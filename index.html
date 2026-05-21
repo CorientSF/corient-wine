@@ -633,6 +633,8 @@ window.addEventListener('DOMContentLoaded', () => {
     </div>
   </div>
   <div class="container wide scroll-body" id="score-content" style="padding-top:24px;"></div>
+  <!-- Email results section — injected by viewMyScore -->
+  <div id="score-email-section" style="max-width:780px;margin:0 auto;padding:0 20px 80px;"></div>
 </div>
 
 <!-- ══════════ SCREEN: ADMIN PASSWORD ══════════ -->
@@ -1272,13 +1274,13 @@ function showEndedScreen() {
 }
 
 async function viewMyScore() {
-  const myId  = getMyId();
+  const myId   = getMyId();
   const player = await dbGet('players/' + myId);
   if (!player) { showToast('Player data not found.'); return; }
   const answerKey = (await dbGet('game/answerKey')) || {};
   document.getElementById('score-player-name').textContent = player.name;
 
-  const scores = computePlayerScore(player, answerKey);
+  const scores  = computePlayerScore(player, answerKey);
   const content = document.getElementById('score-content');
 
   let html = `
@@ -1296,20 +1298,122 @@ async function viewMyScore() {
     const vOk = ans.varietal && w.varietal === ans.varietal;
     const nOk = ans.name     && w.name     === ans.name;
     html += `
-      <div class="answer-row">
-        <span class="aw-num">${i}</span>
-        <div style="flex:1;"><div class="aw-wine">${ans.name||'—'}</div><div class="aw-country">${ans.varietal||'—'}</div></div>
-        <div style="text-align:right;font-size:11px;line-height:1.8;">
-          <span class="${vOk?'correct':'incorrect'}">${w.varietal||'?'} ${vOk?'✓':'✗'}</span><br>
-          <span class="${nOk?'correct':'incorrect'}" style="font-size:10px;">${nOk?'ID ✓':'ID ✗'}</span>
+      <div class="answer-row" style="flex-direction:column;align-items:flex-start;gap:4px;padding:12px;">
+        <div style="display:flex;align-items:center;width:100%;gap:8px;">
+          <span class="aw-num">${i}</span>
+          <div style="flex:1;">
+            <div class="aw-wine">${ans.name||'—'}</div>
+            <div class="aw-country">${ans.varietal||'—'}</div>
+          </div>
+          <div style="text-align:right;font-size:11px;line-height:1.8;flex-shrink:0;">
+            <span class="${vOk?'correct':'incorrect'}">${w.varietal||'?'} ${vOk?'✓':'✗'}</span><br>
+            <span class="${nOk?'correct':'incorrect'}" style="font-size:10px;">${nOk?'ID ✓':'ID ✗'}</span>
+          </div>
+          <div style="font-family:'Cormorant Garamond',serif;font-size:20px;color:var(--silver);min-width:28px;text-align:right;">${w.rating||'—'}</div>
         </div>
+        ${w.notes ? `<div style="font-size:11px;color:var(--text-dim);font-style:italic;padding-left:30px;">"${w.notes}"</div>` : ''}
+        ${!vOk && ans.varietal ? `<div style="font-size:10px;color:var(--text-dim);padding-left:30px;">Correct varietal: ${ans.varietal}</div>` : ''}
+        ${!nOk && ans.name    ? `<div style="font-size:10px;color:var(--text-dim);padding-left:30px;">Correct wine: ${ans.name}</div>`    : ''}
       </div>
     `;
   }
   html += '</div>';
   content.innerHTML = html;
+
+  // Email section
+  buildEmailSection(player, answerKey, scores);
   showScreen('screen-my-score');
 }
+
+function buildEmailSection(player, answerKey, scores) {
+  const emailSection = document.getElementById('score-email-section');
+  const hasEmail = !!(player.email && player.email.trim());
+
+  emailSection.innerHTML = `
+    <div class="separator" style="margin:24px 0;"></div>
+    <div class="score-card">
+      <div class="score-title" style="margin-bottom:12px;">📧 Email My Results</div>
+      ${!hasEmail ? `
+        <p class="small-note mb-8">Enter your email to receive a full results breakdown.</p>
+        <div style="display:flex;gap:10px;flex-wrap:wrap;margin-bottom:12px;">
+          <input type="email" id="results-email-input" placeholder="your@email.com"
+            style="flex:1;min-width:180px;" autocomplete="email">
+          <button class="btn btn-primary" onclick="sendMyResults()" style="flex-shrink:0;">Send Results</button>
+        </div>
+      ` : `
+        <p class="small-note mb-8">Results will be sent to <strong style="color:var(--text);">${player.email}</strong></p>
+        <button class="btn btn-primary" onclick="sendMyResults()">Send My Results</button>
+      `}
+    </div>
+  `;
+
+  // Store for use by sendMyResults
+  window._resultPlayer    = player;
+  window._resultAnswerKey = answerKey;
+  window._resultScores    = scores;
+}
+
+async function sendMyResults() {
+  const player    = window._resultPlayer;
+  const answerKey = window._resultAnswerKey;
+  const scores    = window._resultScores;
+
+  // Resolve email
+  let email = player.email && player.email.trim();
+  if (!email) {
+    const input = document.getElementById('results-email-input');
+    email = input ? input.value.trim() : '';
+  }
+  if (!email) { showToast('Please enter an email address.'); return; }
+
+  // Save email back to Firebase if it was newly entered
+  if (!player.email) {
+    const myId = getMyId();
+    await dbUpdate('players/' + myId, { email });
+    player.email = email;
+  }
+
+  // Build email body
+  const lines = [];
+  lines.push(`Hi ${player.name},`);
+  lines.push('');
+  lines.push('The game has ended! Here are your full results from tonight\'s tasting.');
+  lines.push('');
+  lines.push(`Your Score: ${scores.total} / 24`);
+  lines.push(`Varietals correct: ${scores.varietalPts}/12  ·  Wine ID correct: ${scores.namePts}/12`);
+  lines.push('');
+  lines.push('─────────────────────────────');
+  lines.push('Wine-by-Wine Breakdown');
+  lines.push('─────────────────────────────');
+
+  for (let i = 1; i <= 12; i++) {
+    const w   = (player.wines || {})[i] || {};
+    const ans = answerKey[i] || {};
+    const vOk = ans.varietal && w.varietal === ans.varietal;
+    const nOk = ans.name     && w.name     === ans.name;
+    lines.push('');
+    lines.push(`#${i} — ${ans.name || 'Unknown Wine'}`);
+    lines.push(`Varietal: ${w.varietal || '—'}  ${vOk ? '✓ Correct' : `✗ Incorrect (correct: ${ans.varietal || '?'})`}`);
+    lines.push(`Wine ID:  ${w.name    || '—'}  ${nOk ? '✓ Correct' : `✗ Incorrect (correct: ${ans.name    || '?'})`}`);
+    lines.push(`Rating:   ${w.rating  || '—'}/10`);
+    if (w.notes) lines.push(`Notes:    "${w.notes}"`);
+  }
+
+  lines.push('');
+  lines.push('─────────────────────────────');
+  lines.push('Corient Presents: Judgment of Paris V');
+  lines.push('Results generated by the tasting app.');
+
+  const subject  = encodeURIComponent('Your Results — Corient Presents: Judgment of Paris V');
+  const body     = encodeURIComponent(lines.join('\n'));
+  const mailto   = `mailto:${email}?subject=${subject}&body=${body}`;
+
+  window.location.href = mailto;
+  showToast('Email app opened with your results!');
+}
+
+window.sendMyResults   = sendMyResults;
+window.buildEmailSection = buildEmailSection;
 
 // ─── SCORING ─────────────────────────────────────────────
 function computePlayerScore(player, answerKey) {
@@ -1849,9 +1953,66 @@ async function renderAdminResults() {
     <div class="admin-section"><h3>Country — Highest Avg Rating</h3>${cwHTML||'<p class="small-note">No data yet.</p>'}</div>
     <div class="admin-section"><h3>Country — Player Preference Votes</h3>${cvHTML||'<p class="small-note">No data yet.</p>'}</div>
     <div class="admin-section"><h3>Top Bottles by Rating</h3>${bwHTML||'<p class="small-note">No data yet.</p>'}</div>
-    <div class="admin-section"><h3>Player Leaderboard</h3>${plHTML}</div>
+    <div class="admin-section"><h3>Player Leaderboard</h3>${plHTML}
+      <div style="margin-top:16px;">
+        <button class="btn btn-outline" onclick="exportPlayersCSV()" style="font-size:10px;">
+          ⬇ Export Players as CSV
+        </button>
+        <p class="small-note mt-8">Exports name, email, score, and highest-rated wine for each player.</p>
+      </div>
+    </div>
   `;
 }
+
+async function exportPlayersCSV() {
+  const playersMap = (await dbGet('players'))        || {};
+  const answerKey  = (await dbGet('game/answerKey')) || {};
+  const players    = Object.values(playersMap);
+
+  if (!players.length) { showToast('No players to export.'); return; }
+
+  // For each player find their highest-rated wine
+  function favWine(player) {
+    let best = null, bestRating = 0;
+    for (let i = 1; i <= 12; i++) {
+      const w = (player.wines||{})[i];
+      if (w && w.rating && w.rating > bestRating) {
+        bestRating = w.rating;
+        best = (answerKey[i]||{}).name || w.name || `Wine ${i}`;
+      }
+    }
+    return best || '—';
+  }
+
+  const scores = players.map(p => ({ ...p, scores: computePlayerScore(p, answerKey) }))
+    .sort((a,b) => b.scores.total - a.scores.total);
+
+  const rows = [
+    ['Rank','Name','Email','Varietal Pts','Wine ID Pts','Total Score','Favorite Wine']
+  ];
+  scores.forEach((p, i) => {
+    rows.push([
+      i + 1,
+      p.name || '',
+      p.email || '',
+      p.scores.varietalPts,
+      p.scores.namePts,
+      p.scores.total,
+      favWine(p)
+    ]);
+  });
+
+  const csv = rows.map(r => r.map(cell => `"${String(cell).replace(/"/g,'""')}"`).join(',')).join('\n');
+  const blob = new Blob([csv], { type: 'text/csv' });
+  const url  = URL.createObjectURL(blob);
+  const a    = document.createElement('a');
+  a.href     = url;
+  a.download = 'JudgmentOfParisV_Results.csv';
+  a.click();
+  URL.revokeObjectURL(url);
+  showToast('CSV downloaded!');
+}
+window.exportPlayersCSV = exportPlayersCSV;
 
 function switchAdminTab(tab) {
   const allTabs = ['players','setup','results','qrcodes','invite','scan'];
